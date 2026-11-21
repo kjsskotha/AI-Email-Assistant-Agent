@@ -3,7 +3,7 @@ import streamlit as st
 import sqlite3
 import json
 from datetime import datetime
-from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 
 # ---------------- PAGE CONFIGURATION ----------------
 
@@ -66,137 +66,166 @@ def get_drafts():
 
     drafts = cursor.fetchall()
     conn.close()
+
     return drafts
 
 
 init_db()
 
-# ---------------- AI MODEL ----------------
-
-def identify_task(user_input):
-    text = user_input.lower()
-
-    if any(word in text for word in ["categorize", "category", "classify"]):
-        return "Categorize Email"
-
-    elif any(word in text for word in ["reply", "respond", "response"]):
-        return "Suggest Reply"
-
-    else:
-        return "Generate Email"
-
+# ---------------- GROQ AI MODEL ----------------
 
 def ask_ai(user_input, selected_action):
 
-    try:
-        model = ChatOllama(
-            model="llama3.2",
-            temperature=0.3
+    if selected_action == "Auto Detect":
+        text = user_input.lower()
+
+        if any(word in text for word in [
+            "categorize", "category", "classify"
+        ]):
+            action = "Categorize Email"
+
+        elif any(word in text for word in [
+            "reply", "respond", "response"
+        ]):
+            action = "Suggest Reply"
+
+        else:
+            action = "Generate Email"
+
+    else:
+        action = selected_action
+
+    # Connect to Groq
+    api_key = st.secrets.get("GROQ_API_KEY", "")
+
+    if not api_key:
+        raise ValueError(
+            "Groq API key is missing. Add GROQ_API_KEY in Streamlit Secrets."
         )
 
-        if selected_action == "Auto Detect":
-            action = identify_task(user_input)
-        else:
-            action = selected_action
+    model = ChatGroq(
+        api_key=api_key,
+        model="openai/gpt-oss-20b",
+        temperature=0.3
+    )
 
-        if action == "Generate Email":
+    # ---------------- PROMPTS ----------------
 
-            prompt = f"""
-            Create a professional email based on the user's request.
+    if action == "Generate Email":
 
-            Return ONLY valid JSON in this format:
-            {{
-                "subject": "Email subject",
-                "body": "Complete email body"
-            }}
+        prompt = f"""
+        You are a professional email writing assistant.
 
-            User request: {user_input}
-            """
+        Create a clear, polite and professional email
+        based on the user's request.
 
-        elif action == "Suggest Reply":
+        Return ONLY valid JSON in this format:
+        {{
+            "subject": "Email subject",
+            "body": "Complete email body"
+        }}
 
-            prompt = f"""
-            Write a polite and professional reply to the following email.
+        User request:
+        {user_input}
+        """
 
-            Return ONLY valid JSON in this format:
-            {{
-                "subject": "Reply subject",
-                "body": "Complete reply"
-            }}
+    elif action == "Suggest Reply":
 
-            Email: {user_input}
-            """
+        prompt = f"""
+        You are a professional email assistant.
 
-        else:
+        Write a polite and suitable reply to the given email.
 
-            prompt = f"""
-            Categorize the following email into only one category:
-            Work, Personal, or Urgent.
+        Return ONLY valid JSON in this format:
+        {{
+            "subject": "Reply subject",
+            "body": "Complete reply"
+        }}
 
-            Give a short reason.
+        Email:
+        {user_input}
+        """
 
-            Return ONLY valid JSON in this format:
-            {{
-                "category": "Work",
-                "reason": "Reason for this category"
-            }}
+    else:
 
-            Email: {user_input}
-            """
+        prompt = f"""
+        You are an email classification assistant.
 
-        response = model.invoke(prompt)
-        result = response.content
+        Categorize the email into exactly one category:
+        Work, Personal, or Urgent.
 
-        # Extract JSON response
-        start = result.find("{")
-        end = result.rfind("}") + 1
+        Give a short reason for the category.
 
-        if start == -1 or end == 0:
-            raise ValueError("AI returned an invalid response.")
+        Return ONLY valid JSON in this format:
+        {{
+            "category": "Work",
+            "reason": "Reason for this category"
+        }}
 
-        data = json.loads(result[start:end])
+        Email:
+        {user_input}
+        """
 
-        if action == "Categorize Email":
+    # ---------------- GET AI RESPONSE ----------------
 
-            category = data.get("category", "").strip()
-            reason = data.get("reason", "").strip()
+    response = model.invoke(prompt)
+    result = response.content
 
-            if category not in ["Work", "Personal", "Urgent"]:
-                raise ValueError("Invalid email category.")
+    if not isinstance(result, str):
+        raise ValueError("The AI returned an invalid response.")
 
-            if not reason:
-                raise ValueError("AI did not provide a reason.")
+    # Extract JSON
+    start = result.find("{")
+    end = result.rfind("}") + 1
 
-            return action, {
-                "category": category,
-                "reason": reason
-            }
+    if start == -1 or end == 0:
+        raise ValueError("The AI response was not valid JSON.")
 
-        else:
+    data = json.loads(result[start:end])
 
-            subject = data.get("subject", "").strip()
-            body = data.get("body", "").strip()
+    # ---------------- VALIDATE RESULT ----------------
 
-            if not subject or not body:
-                raise ValueError("AI returned an incomplete email.")
+    if action == "Categorize Email":
 
-            return action, {
-                "subject": subject,
-                "body": body
-            }
+        category = str(data.get("category", "")).strip()
+        reason = str(data.get("reason", "")).strip()
 
-    except Exception as e:
-        raise Exception(str(e))
+        if category not in ["Work", "Personal", "Urgent"]:
+            raise ValueError("Invalid category returned by AI.")
+
+        if not reason:
+            raise ValueError("The AI did not provide a reason.")
+
+        return action, {
+            "category": category,
+            "reason": reason
+        }
+
+    else:
+
+        subject = str(data.get("subject", "")).strip()
+        body = str(data.get("body", "")).strip()
+
+        if not subject or not body:
+            raise ValueError("The AI returned an incomplete email.")
+
+        return action, {
+            "subject": subject,
+            "body": body
+        }
 
 
 # ---------------- MAIN APPLICATION ----------------
 
 st.title("📧 AI EMAIL ASSISTANT AGENT")
-st.caption("Your smart assistant for generating, replying to and categorizing emails.")
+
+st.caption(
+    "Your smart assistant for generating, replying to and categorizing emails."
+)
 
 st.divider()
 
-# Dashboard metrics
+# ---------------- DASHBOARD ----------------
 
 drafts = get_drafts()
 
@@ -236,25 +265,30 @@ user_input = st.text_area(
 if st.button("✨ Generate Result", use_container_width=True):
 
     if not user_input.strip():
+
         st.warning("Please enter some text before generating.")
 
     else:
-        with st.spinner("AI is processing your request..."):
 
-            try:
-                action, result = ask_ai(user_input, selected_action)
+        try:
+
+            with st.spinner("AI is processing your request..."):
+
+                action, result = ask_ai(
+                    user_input,
+                    selected_action
+                )
 
                 st.session_state["action"] = action
                 st.session_state["result"] = result
 
-                st.success("Result generated successfully!")
+            st.success("Result generated successfully!")
 
-            except Exception as e:
-                st.error(
-                    "Unable to generate a result. "
-                    "Please check that Ollama is running and the llama3.2 model is installed."
-                )
-                st.caption(str(e))
+        except Exception as e:
+
+            st.error("Unable to generate a result.")
+
+            st.caption(str(e))
 
 
 # ---------------- DISPLAY RESULT ----------------
@@ -271,33 +305,29 @@ if "result" in st.session_state:
 
         st.info("Email Category")
 
-        st.markdown(
-            f"### {result['category']}"
-        )
+        st.markdown(f"### {result['category']}")
 
         st.write("**Reason:**")
         st.write(result["reason"])
 
     else:
 
-        st.write("**Email Subject**")
-
         edited_subject = st.text_input(
-            "Edit subject",
+            "Email Subject",
             value=result["subject"],
             key="edited_subject"
         )
 
-        st.write("**Email Body**")
-
         edited_body = st.text_area(
-            "Edit email body",
+            "Email Body",
             value=result["body"],
             height=200,
             key="edited_body"
         )
 
-        st.caption("You can edit the generated email before saving it.")
+        st.caption(
+            "You can edit the generated email before saving it."
+        )
 
         if st.button("💾 Save Draft", use_container_width=True):
 
@@ -312,10 +342,13 @@ if "result" in st.session_state:
                 st.success("Draft saved successfully!")
 
             else:
-                st.warning("Subject and body cannot be empty.")
+
+                st.warning(
+                    "Subject and body cannot be empty."
+                )
 
 
-# ---------------- SAVED DRAFTS ----------------
+# ---------------- SAVED DRAFT HISTORY ----------------
 
 st.divider()
 st.subheader("📂 Saved Draft History")
@@ -337,4 +370,6 @@ if drafts:
 
 else:
 
-    st.info("No saved drafts yet. Generate and save an email to see it here.")
+    st.info(
+        "No saved drafts yet. Generate and save an email to see it here."
+    )
